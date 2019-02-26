@@ -24,16 +24,16 @@ class STModel(object):
         self.n_class = n_class
         self.lstm_outputs = []
         self.pred = None
+        # keep prob
+        self.keep_prob = 0.5
         # loss
         self.lambda1 = 1e-3
-        self.lambda2 = 1e-4
         self.lambda3 = 5e-4
         self.loss = None
         self.l0 = None
         self.l1 = None
-        self.l2 = None
         # train
-        self.lr = 1e-3
+        self.lr = 1e-2
         self.step = None
         # summary
         self.summary = None
@@ -55,7 +55,6 @@ class STModel(object):
             # regularizer
             with tf.variable_scope("l1_regularizer"):
                 reg1 = tf.contrib.layers.l2_regularizer(scale=self.lambda1)
-                reg2 = tf.contrib.layers.l2_regularizer(scale=self.lambda2)
                 reg3 = tf.contrib.layers.l1_regularizer(scale=self.lambda3)
 
             # input layer
@@ -71,58 +70,29 @@ class STModel(object):
 
             # lstm
             with tf.variable_scope("lstm"):
-                lstm_cell = tf.nn.rnn_cell.LSTMCell(self.n_hidden,
-                                                    name="lstm_cell",
-                                                    dtype=tf.float32)
-                state = lstm_cell.zero_state(self.batch, dtype=tf.float32)
+                lstm_cell = tf.nn.rnn_cell.LSTMCell(num_units=self.n_dim,
+                                                    forget_bias=1.0,
+                                                    name="basic_lstm_cell",
+                                                    state_is_tuple=True)
 
-            # attention
-            s_attns = []
-            t_attns = []
-            for i in range(self.n_frame):
-                xt = tf.reshape(self.x[:, i, :, :],
-                                (-1, self.n_dim * self.n_keypoint))
+                lstm_cell = tf.contrib.rnn.DropoutWrapper(cell=lstm_cell,
+                                                          input_keep_prob=1.0,
+                                                          output_keep_prob=self.keep_prob)
 
-                # spatio-attention
-                with tf.variable_scope("spatial_attention"):
-                    s_attn = attn_dense(xt, state.h, self.n_keypoint,
-                                        name="attention_dense",
-                                        activation=tf.nn.tanh,
-                                        reuse=(i!=0), regularizer=reg3)
-                    with tf.variable_scope("attention_linear",
-                                           reuse=(i!=0)):
-                        us = tf.get_variable("us", 1)
-                        bus = tf.get_variable("bus", (self.n_keypoint,))
-                        s_attn = tf.nn.softmax(tf.add(tf.multiply(us, s_attn),
-                                                      bus))
-                    # record for regularizer
-                    s_attns.append(s_attn)
-                    s_attn = tf.expand_dims(s_attn, -1)
+                init_state = lstm_cell.zero_state(self.batch, dtype=tf.float32)
+                xt = tf.reshape(self.x,
+                                (-1, self.n_frame, self.n_dim *
+                                 self.n_keypoint))
+                outputs, _ = tf.nn.dynamic_rnn(lstm_cell, inputs=xt,
+                                               initial_state=init_state,
+                                               time_major=False)
 
-                # temporal-attention
-                with tf.variable_scope("temporal_attention"):
-                    t_attn = attn_dense(xt, state.h, 1, name="attention_dense",
-                                        activation=tf.nn.relu,
-                                        reuse=(i!=0), regularizer=reg3)
-                    # record for regularizer
-                    t_attns.append(t_attn)
 
-                # add spatio-attention to input sequence
-                xt = tf.reshape(xt, (-1, self.n_keypoint, self.n_dim))
-                xs = tf.reduce_sum(tf.multiply(s_attn, xt), axis=1)
-
-                # run lstm for a single timestep
-                out, state = lstm_cell(xs, state)
-                # add temporal-attention to output
-                out = dense(out, self.n_class, name="output_dense",
-                            activation=None, reuse=tf.AUTO_REUSE,
-                            regularizer=reg3)
-                self.lstm_outputs.append(tf.multiply(out, t_attn))
 
             # output
             with tf.variable_scope("output"):
-                logits = tf.add_n(self.lstm_outputs)
-                self.logits = logits
+                logits = dense(outputs[:, -1, :], self.n_class, name="output_dense",
+                               activation=None, reuse=tf.AUTO_REUSE)
                 self.pred = tf.nn.softmax(logits, axis=-1)
                 correct = tf.equal(tf.argmax(self.pred, -1),
                                    tf.argmax(self.y_one_hot, -1))
@@ -134,17 +104,13 @@ class STModel(object):
                 # cross-entropy
                 self.l0 = tf.losses.softmax_cross_entropy(self.y_one_hot, logits)
                 # spatio-attention l2 regularization
-                s_reg = 1 - self.n_keypoint * tf.add_n(s_attns) / self.n_frame
-                self.l1 = tf.contrib.layers.apply_regularization(reg1, [s_reg])
-                # temporal-attention l2 regularization
-                t_reg = tf.add_n(t_attns) / self.n_frame
-                self.l2 = tf.contrib.layers.apply_regularization(reg2, [t_reg])
+                # s_reg = 1 - self.n_keypoint * tf.add_n(s_attns) / self.n_frame
+                # self.l1 = tf.contrib.layers.apply_regularization(reg1, [s_reg])
                 # total loss
                 self.loss = tf.losses.get_total_loss()
                 tf.summary.scalar('loss', self.loss)
                 tf.summary.scalar('loss0', self.l0)
-                tf.summary.scalar('loss1', self.l1)
-                tf.summary.scalar('loss2', self.l2)
+                # tf.summary.scalar('loss1', self.l1)
 
             # optimizer
             with tf.variable_scope("optimizer"):
@@ -165,18 +131,16 @@ class STModel(object):
         with tf.Session(graph=self.graph,
                         config=tf.ConfigProto(gpu_options=gpu_options)) as sess:
             sess.run(tf.global_variables_initializer())
-            sess.run(tf.local_variables_initializer())
             for x, y, _ in train_data:
                 if selected_list is not None:
                     x = x[:, :, selected_list, :]
                 curr_step = sess.run(self.global_step)
                 # assert x.shape[0] == y.shape[0]
-                summary, _, s = sess.run([self.summary, self.step, self.logits],
+                summary, _ = sess.run([self.summary, self.step],
                                       feed_dict={self.x: x,
                                                  self.y: y,
                                                  self.batch: x.shape[0]})
                 self.train_writter.add_summary(summary, curr_step)
-                print(s)
                 if curr_step % 100 == 0 and valid_data is not None:
                     _x, _y = valid_data
                     summary = sess.run([self.summary],

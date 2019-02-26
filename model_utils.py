@@ -82,7 +82,7 @@ def get_random_batch(package, random_idxs, offset, batch_size):
         batch = list(map(lambda x: x[random_idxs[offset:offset + batch_size]],
                          package))
         offset += batch_size
-    return batch
+    return batch, offset
 
 def draw_debug_image(feature, filepath):
     """Draw debug image of input
@@ -203,7 +203,7 @@ class FeatureParser(object):
         hmax = (self.crop[3] - self.crop[1])
         m = np.asarray([wcen, hcen])
         r = np.asarray([wmax, hmax])
-        data_array = (data_array - m) / r
+        return (data_array - m) / r
 
     def denormalize(self, data_array, resize=1):
         wcen = (self.crop[2] + self.crop[0]) / 2
@@ -212,7 +212,7 @@ class FeatureParser(object):
         hmax = (self.crop[3] - self.crop[1])
         m = np.asarray([wcen, hcen])
         r = np.asarray([wmax, hmax])
-        data_array = data_array * r + m
+        return data_array * r + m
 
     def get_motion_vector(self, motion_dirs, labels):
 
@@ -306,12 +306,12 @@ class FeatureParser(object):
         for i in range(step):
             # load data from paths if use external mode
             if external:
-                _data, _label, offset = get_random_batch([x, y], random_idxs,
+                (_data, _label), offset = get_random_batch([x, y], random_idxs,
                                                          offset, batch_size)
                 _x, _y, _paths = self.get_motion_vector(_data, _label)
             # if not external mode, just refer to the fetched batch
             else:
-                _x, _y, _paths = get_random_batch([x, y, paths], random_idxs,
+                (_x, _y, _paths), offset = get_random_batch([x, y, paths], random_idxs,
                                                   offset, batch_size)
 
             # map feature paths to original image path
@@ -330,7 +330,7 @@ class FeatureParser(object):
             _xx, _yy, _paths = tuple(map(list, tuple(zip(*batch_array))))
             _xx = np.asarray(_xx)
             _yy = np.asarray(_yy)
-            self.normalize(_xx)
+            _xx = self.normalize(_xx)
             yield np.asarray(_xx), np.asarray(_yy, dtype=np.int32), _paths
 
 
@@ -339,7 +339,7 @@ if __name__ == "__main__":
                                    image_dir="../dataset/frame",
                                    data_format=(30, 25, 2))
     for xx, yy, paths in feature_parser.batch_parser(step=1, batch_size=8):
-        feature_parser.denormalize(xx)
+        xx = feature_parser.denormalize(xx)
         write_debug_gif(xx[0], paths[0], "/Users/bob/Academic/graduation-project/debug.gif")
         break
 
