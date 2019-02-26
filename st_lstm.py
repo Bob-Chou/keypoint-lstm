@@ -29,15 +29,22 @@ class STModel(object):
         self.lambda2 = 1e-4
         self.lambda3 = 5e-4
         self.loss = None
+        self.l0 = None
+        self.l1 = None
+        self.l2 = None
         # train
-        self.lr = 1e-2
+        self.lr = 1e-3
         self.step = None
         # summary
         self.summary = None
         self.accuracy = None
         self.saver = None
-        self.train_writter = tf.summary.FileWriter('./train_summary')
-        self.test_writter = tf.summary.FileWriter('./test_summary')
+        if tf.gfile.Exists('./summary'):
+            tf.gfile.DeleteRecursively('./summary')
+        tf.gfile.MakeDirs('./summary/train')
+        tf.gfile.MakeDirs('./summary/test')
+        self.train_writter = tf.summary.FileWriter('./summary/train')
+        self.test_writter = tf.summary.FileWriter('./summary/test')
         # construct the network
         self._build_network()
 
@@ -103,8 +110,7 @@ class STModel(object):
                 # add spatio-attention to input sequence
                 xt = tf.reshape(xt, (-1, self.n_keypoint, self.n_dim))
                 xs = tf.reduce_sum(tf.multiply(s_attn, xt), axis=1)
-                xt = tf.reshape(self.x[:, i, :, :],
-                                (-1, self.n_dim * self.n_keypoint))
+
                 # run lstm for a single timestep
                 out, state = lstm_cell(xs, state)
                 # add temporal-attention to output
@@ -116,30 +122,29 @@ class STModel(object):
             # output
             with tf.variable_scope("output"):
                 logits = tf.add_n(self.lstm_outputs)
+                self.logits = logits
                 self.pred = tf.nn.softmax(logits, axis=-1)
                 correct = tf.equal(tf.argmax(self.pred, -1),
                                    tf.argmax(self.y_one_hot, -1))
                 self.accuracy = tf.reduce_mean(tf.cast(correct, tf.float32))
-                # _, self.accuracy = tf.metrics.accuracy(
-                #     labels=tf.argmax(self.y_one_hot, axis=1),
-                #     predictions=tf.argmax(self.pred, axis=1))
                 tf.summary.scalar('accuracy', self.accuracy)
 
             # loss
             with tf.variable_scope("loss"):
                 # cross-entropy
-                _ = tf.losses.softmax_cross_entropy(self.y_one_hot, logits)
+                self.l0 = tf.losses.softmax_cross_entropy(self.y_one_hot, logits)
                 # spatio-attention l2 regularization
-                s_reg = tf.reduce_mean(
-                    1 - self.n_keypoint * tf.add_n(s_attns) / self.n_frame,
-                    axis=0)
-                _ = tf.contrib.layers.apply_regularization(reg1, [s_reg])
+                s_reg = 1 - self.n_keypoint * tf.add_n(s_attns) / self.n_frame
+                self.l1 = tf.contrib.layers.apply_regularization(reg1, [s_reg])
                 # temporal-attention l2 regularization
-                t_reg = tf.reduce_mean(tf.add_n(t_attns) / self.n_frame, axis=0)
-                _ = tf.contrib.layers.apply_regularization(reg2, [t_reg])
+                t_reg = tf.add_n(t_attns) / self.n_frame
+                self.l2 = tf.contrib.layers.apply_regularization(reg2, [t_reg])
                 # total loss
                 self.loss = tf.losses.get_total_loss()
                 tf.summary.scalar('loss', self.loss)
+                tf.summary.scalar('loss0', self.l0)
+                tf.summary.scalar('loss1', self.l1)
+                tf.summary.scalar('loss2', self.l2)
 
             # optimizer
             with tf.variable_scope("optimizer"):
@@ -166,21 +171,18 @@ class STModel(object):
                     x = x[:, :, selected_list, :]
                 curr_step = sess.run(self.global_step)
                 # assert x.shape[0] == y.shape[0]
-                summary, l, acc, _ = sess.run([self.summary, self.loss,
-                                         self.accuracy, self.step],
-                                         feed_dict={
-                                             self.x: x,
-                                             self.y: y,
-                                             self.batch: x.shape[0]})
-                print(curr_step, l, acc)
+                summary, _, s = sess.run([self.summary, self.step, self.logits],
+                                      feed_dict={self.x: x,
+                                                 self.y: y,
+                                                 self.batch: x.shape[0]})
                 self.train_writter.add_summary(summary, curr_step)
+                print(s)
                 if curr_step % 100 == 0 and valid_data is not None:
                     _x, _y = valid_data
                     summary = sess.run([self.summary],
-                                       feed_dict={
-                                           self.x: _x,
-                                           self.y: _y,
-                                           self.batch: _x.shape[0]})
+                                       feed_dict={self.x: _x,
+                                                  self.y: _y,
+                                                  self.batch: _x.shape[0]})
                     self.test_writter.add_summary(summary, curr_step)
                 if curr_step % 1000 == 0:
                     self.saver.save(sess, "./checkpoint/st_lstm.ckpt",
@@ -191,10 +193,11 @@ if __name__ == "__main__":
     n_frame = 30
     n_keypoint = 25
     n_selected_keypoint = 7
-    selected_list = [1,2,3,4,5,6,7]
+    selected_list = [1, 2, 3, 4, 5, 6, 7]
     st_model = STModel(n_frame, n_selected_keypoint, n_class=4)
-    feature_parser = FeatureParser(feature_dir="../dataset/feature",
-                                   image_dir="../dataset/frame",
-                                   data_format=(n_frame, n_keypoint, 2))
-    st_model.train(feature_parser.batch_parser(step=10000, batch_size=32),
+    feature_parser = FeatureParser(feature_dir="../../dataset/feature",
+                                   image_dir="../../dataset/frame",
+                                   data_format=(n_frame, n_keypoint, 2),
+                                   crop=(380, 70, 870, 700))
+    st_model.train(feature_parser.batch_parser(step=10000, batch_size=16),
                    selected_list=selected_list)

@@ -3,3 +3,5 @@ checkpoint/
 test.py
 .idea/
 *.log
+log
+summary/
