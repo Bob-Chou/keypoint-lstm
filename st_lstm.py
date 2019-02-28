@@ -1,7 +1,7 @@
 import numpy as np
 import tensorflow as tf
 
-from model_utils import *
+from utils import *
 
 
 class STModel(object):
@@ -70,7 +70,8 @@ class STModel(object):
 
             # lstm
             with tf.variable_scope("lstm"):
-                lstm_cell = tf.nn.rnn_cell.LSTMCell(num_units=self.n_dim,
+                n_input_dim = self.n_dim * self.n_keypoint
+                lstm_cell = tf.nn.rnn_cell.LSTMCell(num_units=n_input_dim,
                                                     forget_bias=1.0,
                                                     name="basic_lstm_cell",
                                                     state_is_tuple=True)
@@ -131,7 +132,7 @@ class STModel(object):
         with tf.Session(graph=self.graph,
                         config=tf.ConfigProto(gpu_options=gpu_options)) as sess:
             sess.run(tf.global_variables_initializer())
-            for x, y, _ in train_data:
+            for x, y in train_data:
                 if selected_list is not None:
                     x = x[:, :, selected_list, :]
                 curr_step = sess.run(self.global_step)
@@ -143,10 +144,10 @@ class STModel(object):
                 self.train_writter.add_summary(summary, curr_step)
                 if curr_step % 100 == 0 and valid_data is not None:
                     _x, _y = valid_data
-                    summary = sess.run([self.summary],
-                                       feed_dict={self.x: _x,
-                                                  self.y: _y,
-                                                  self.batch: _x.shape[0]})
+                    summary, = sess.run([self.summary],
+                                        feed_dict={self.x: _x,
+                                                   self.y: _y,
+                                                   self.batch: _x.shape[0]})
                     self.test_writter.add_summary(summary, curr_step)
                 if curr_step % 1000 == 0:
                     self.saver.save(sess, "./checkpoint/st_lstm.ckpt",
@@ -154,14 +155,38 @@ class STModel(object):
 
 
 if __name__ == "__main__":
-    n_frame = 30
-    n_keypoint = 25
-    n_selected_keypoint = 7
-    selected_list = [1, 2, 3, 4, 5, 6, 7]
-    st_model = STModel(n_frame, n_selected_keypoint, n_class=4)
-    feature_parser = FeatureParser(feature_dir="../../dataset/feature",
-                                   image_dir="../../dataset/frame",
-                                   data_format=(n_frame, n_keypoint, 2),
-                                   crop=(380, 70, 870, 700))
-    st_model.train(feature_parser.batch_parser(step=10000, batch_size=16),
-                   selected_list=selected_list)
+    n_frame = 10
+    n_keypoint = 30
+    n_dim = 3
+    batch_size = 16
+    max_epoch = 10000
+    n_class = 8
+
+    root = "/home/bob/Workspace/undergrad-project/dataset/SBU"
+    train_set, valid_set = walk_dataset(root, ".txt", valid_list=["s05"])
+    train_label = [int(sample.split("/")[-3]) - 1 for sample in train_set]
+    valid_label = [int(sample.split("/")[-3]) - 1 for sample in valid_set]
+    valid_set = load_batch_parallel(valid_set, [n_frame, n_keypoint, n_dim])
+    valid_set = (valid_set - [0.5, 0.5, 1]) / [0.5, 0.5, 1.]
+
+    def training_data_generator(package, shape, batch_size, max_step=None,
+                                max_epoch=None):
+        for batch in random_batch_generator(package, batch_size,
+                                            max_step=max_step,
+                                            max_epoch=max_epoch):
+            batch[0] = load_batch_parallel(batch[0], shape)
+            batch[0] = (batch[0] - [0.5, 0.5, 1]) / [0.5, 0.5, 1.]
+            yield batch
+
+    training_data = training_data_generator([train_set, train_label],
+                                            [n_frame, n_keypoint, n_dim],
+                                            batch_size,
+                                            max_epoch=max_epoch)
+
+    model = STModel(n_frame, n_keypoint, n_dim=n_dim, n_hidden=64,
+                    n_class=n_class)
+    model.train(training_data, valid_data=[valid_set, valid_label])
+
+
+
+

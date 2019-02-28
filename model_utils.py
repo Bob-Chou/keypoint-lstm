@@ -11,7 +11,6 @@ from PIL import Image
 from PIL import ImageDraw
 
 
-
 def dense(x, z_dim, name, activation=None, reuse=None, regularizer=None):
     """Normal dense layer"""
     x_dim = x.shape[-1]
