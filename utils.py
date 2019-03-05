@@ -73,14 +73,34 @@ def add_summary(summary_list, collection_list):
     list(map(lambda x: x.extend(summary_list), collection_list))
 
 
-def filter_trainable_vars(var_list, freeze_list=[]):
+def filter_vars(var_list, freeze_list):
     """Return the filtered variable list
 
     :param var_list: all variable list
     :param freeze_list: key words for variables to be left out
     :return:
     """
-    return [v for v in var_list if all([k not in v for k in freeze_list])]
+    return [v for v in var_list if all([k not in v.name for k in freeze_list])]
+
+
+def pick_vars(var_list, pick_list):
+    """Return the picked variable list
+
+    :param var_list: all variable list
+    :param pick_list: key words for variables to be picked out
+    :return:
+    """
+    return [v for v in var_list if any([k in v.name for k in pick_list])]
+
+
+def get_tensor(g, name):
+    """Get a tensor in the graph by name
+
+    :param g:
+    :param name:
+    :return: the tensor
+    """
+    return g.get_tensor_by_name(name)
 
 
 def random_batch_generator(package, batch_size, max_step=None, max_epoch=None):
@@ -217,11 +237,11 @@ def get_config(filename):
     config.data.std = list(map(float,
                                reader.get("data", "std").split(",")))
     config.model = Config()
-    config.model.name = reader.get("model", "name")
     config.model.n_frame = reader.getint("model", "n_frame")
     config.model.n_class = reader.getint("model", "n_class")
     config.model.n_keypoint = reader.getint("model", "n_keypoint")
     config.model.n_dim = reader.getint("model", "n_dim")
+    config.model.n_lstm = reader.getint("model", "n_lstm")
     config.model.n_hidden = reader.getint("model", "n_hidden")
     config.model.learning_rate = reader.getfloat("model", "learning_rate")
     config.model.lambda1 = reader.getfloat("model", "lambda1")
@@ -230,7 +250,8 @@ def get_config(filename):
 
     config.train = Config()
     config.train.batch_size = reader.getint("train", "batch_size")
-    config.train.n_epoch = reader.getint("train", "n_epoch")
+    config.train.n_pretrain_epoch = reader.getint("train", "n_pretrain_epoch")
+    config.train.n_finetune_epoch = reader.getint("train", "n_finetune_epoch")
     config.train.valid_set = reader.get("train", "valid_set").split(",")
     config.train.valid_per_step = reader.getint("train", "valid_per_step")
     config.train.save_per_step = reader.getint("train", "save_per_step")
