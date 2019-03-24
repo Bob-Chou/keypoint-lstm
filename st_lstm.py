@@ -232,6 +232,7 @@ class STModel(object):
                 self.global_step = tf.get_variable("global_step",
                                                    initializer=0,
                                                    trainable=False)
+                print(self.global_step)
 
             # merged summary
             with tf.variable_scope("summary"):
@@ -254,10 +255,12 @@ class STModel(object):
         :param valid_per: a validation step after how many steps
         :param save_per: save the model after how many steps
         :param freeze_vars: a list of keywords to freeze viarables
-        :param restore_ckpt: the directory to the saved pretrained
+        :param restore_from: a dictionary to denote the checkpoint and var list
+                             to restore
         :param override: whether to override the checkpoint file
         :return:
         """
+        tf.logging.info("Start training {}".format(self.name))
         ckpt_dir = "./checkpoint/{}".format(self.name)
         if freeze_vars is not None:
             trainable_vars = filter_vars(self.all_vars, freeze_vars)
@@ -305,7 +308,6 @@ class STModel(object):
             if tf.gfile.Exists(ckpt_dir) and override:
                 tf.gfile.DeleteRecursively(ckpt_dir)
 
-            tf.logging.info("Start training {}".format(self.name))
             for x, y, m in train_data:
                 curr_step = sess.run(self.global_step)
                 summary, _ = sess.run([self.train_summary, op],
