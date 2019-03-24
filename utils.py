@@ -172,7 +172,7 @@ def load_batch_parallel(file_list, shape, as_flow=False):
         return None
 
     def _load_data_parallel(file, idx, shape, out):
-        n_frame = shape[0]
+        n_frame = shape[0] + int(as_flow)
         with open(file) as f:
             data_array = [list(map(float, line.strip().split(",")))
                           for line in f.readlines()]
@@ -188,7 +188,7 @@ def load_batch_parallel(file_list, shape, as_flow=False):
         else:
             data_array = np.pad(data_array,
                                 [[0, n_frame-real_length], [0, 0], [0, 0]],
-                                "mean")
+                                "edge")
             selected_idxs = list(range(real_length)) + \
                             [-1 for _ in range(n_frame - real_length)]
         out[idx] = (data_array[selected_idxs], selected_idxs)
@@ -206,14 +206,13 @@ def load_batch_parallel(file_list, shape, as_flow=False):
         th.join()
     threads.clear()
 
-    batch, idxs = list(zip(*collection))
+    batch, idxs = list(map(np.asarray, zip(*collection)))
 
     if as_flow:
-        batch = batch[1:] - batch[:-1]
-        idxs = idxs[:-1]
+        batch = batch[:, 1:, ...] - batch[:, :-1, ...]
+        idxs = idxs[:, :-1]
 
-    return np.asarray(batch), np.asarray(idxs)
-
+    return batch, idxs
 
 def get_config(filename):
     """Read and parse the config file

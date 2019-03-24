@@ -75,7 +75,12 @@ class STModel(object):
                 self.y = tf.placeholder(tf.int32, [None, ], name="label")
                 self.mask = tf.placeholder(tf.int32, [None, ], name="mask")
                 self.batch = tf.placeholder(tf.int32, [], name="batch_size")
+                self.training = tf.placeholder(tf.bool, [], name="training")
                 y_one_hot = tf.one_hot(self.y, self.n_class, name="one_hot")
+
+            with tf.variable_scope("batchnorm"):
+                feature = tf.layers.batch_normalization(self.x,
+                                                        training=self.training)
 
             # regularizer
             with tf.variable_scope("regularizer"):
@@ -109,7 +114,7 @@ class STModel(object):
                 for i in range(self.n_frame):
                     reuse = i != 0
 
-                    xt = tf.reshape(self.x[:, i, :, :],
+                    xt = tf.reshape(feature[:, i, :, :],
                                     (-1, self.n_dim * self.n_keypoint))
 
                     # spatio-attention
@@ -181,12 +186,11 @@ class STModel(object):
                 self.logits = tf.identity(self.logits, "logits")
 
                 self.pred = tf.nn.softmax(self.logits, axis=-1)
-                logits = tf.identity(self.logits, "predictions")
+                self.pred = tf.identity(self.pred, "predictions")
 
                 correct = tf.equal(tf.argmax(self.pred, -1),
                                    tf.argmax(y_one_hot, -1))
                 self.accuracy = tf.reduce_mean(tf.cast(correct, tf.float32))
-                logits = tf.identity(logits, "accuracy")
 
                 add_summary([tf.summary.scalar("accuracy", self.accuracy)],
                             [train_summaries, test_summaries])
@@ -194,7 +198,7 @@ class STModel(object):
             # loss
             with tf.variable_scope("loss"):
                 # cross-entropy
-                l0 = tf.losses.softmax_cross_entropy(y_one_hot, logits)
+                l0 = tf.losses.softmax_cross_entropy(y_one_hot, self.logits)
                 tf.identity(l0, "cross_entropy_loss")
                 # spatio-attention l2 regularization
                 s_reg = tf.reduce_sum(s_attn_mat * mask_mat,
@@ -236,7 +240,7 @@ class STModel(object):
                 tf.logging.info(v)
 
     def train(self, train_data, valid_data=None, valid_per=100, save_per=1000,
-              restore_vars=None, freeze_vars=None, restore_ckpt=""):
+              restore_vars=None, freeze_vars=None, restore_from=None):
         """Train the model
 
         :param train_data: data generator return x, y, mask for each call
@@ -253,13 +257,20 @@ class STModel(object):
             trainable_vars = filter_vars(self.all_vars, freeze_vars)
         else:
             trainable_vars = self.all_vars
-        if restore_vars is not None:
-            restore_vars = pick_vars(self.all_vars, restore_vars)
+        if restore_from is not None:
+            for k, v in restore_from.items():
+                if bool(v):
+                    restore_vars = pick_vars(self.all_vars, v)
+                else:
+                    restore_vars = self.all_vars
+                restore_from[k] = restore_vars
         else:
-            restore_vars = []
+            restore_from = {}
 
         tf.logging.info("Vars to be restored:")
-        tf.logging.info([v.name for v in restore_vars])
+        for k, restore_vars in restore_from.items():
+            tf.logging.info("From {}:".format(k))
+            tf.logging.info([v.name for v in restore_vars])
         tf.logging.info("Vars to be updated:")
         tf.logging.info([v.name for v in trainable_vars])
 
@@ -277,10 +288,12 @@ class STModel(object):
                                                  global_step=self.global_step)
 
             sess.run(tf.global_variables_initializer())
-            if restore_ckpt != "" and len(restore_vars) > 0:
-                saver = tf.train.Saver(restore_vars)
-                ckpt = tf.train.get_checkpoint_state(restore_ckpt)
-                saver.restore(sess, ckpt.model_checkpoint_path)
+            if len(restore_from) > 0:
+                for restore_ckpt, restore_vars in restore_from.items():
+                    tf.logging.info("Restoring from {}".format(restore_ckpt))
+                    saver = tf.train.Saver(restore_vars)
+                    ckpt = tf.train.get_checkpoint_state(restore_ckpt)
+                    saver.restore(sess, ckpt.model_checkpoint_path)
             saver = tf.train.Saver()
             tf.logging.info("Please monitor the training process with:\n"
                             "tensorboard --logdir=./summary")
@@ -290,7 +303,8 @@ class STModel(object):
                                       feed_dict={self.x: x,
                                                  self.y: y,
                                                  self.batch: x.shape[0],
-                                                 self.mask: m})
+                                                 self.mask: m,
+                                                 self.training: True})
                 self.train_writter.add_summary(summary, curr_step)
                 if curr_step % valid_per == 0 and valid_data is not None:
                     _x, _y, _m = valid_data
@@ -298,7 +312,8 @@ class STModel(object):
                                         feed_dict={self.x: _x,
                                                    self.y: _y,
                                                    self.batch: _x.shape[0],
-                                                   self.mask: _m})
+                                                   self.mask: _m,
+                                                   self.training: False})
                     self.test_writter.add_summary(summary, curr_step)
                 if curr_step % save_per == 0:
                     saver.save(sess, os.path.join(ckpt_dir, "model.ckpt"),
@@ -314,10 +329,11 @@ if __name__ == "__main__":
     train_label = [int(sample.split("/")[-3]) - 1 for sample in train_set]
     valid_label = [int(sample.split("/")[-3]) - 1 for sample in valid_set]
     valid_set, valid_mask = load_batch_parallel(valid_set,
-                                          [config.model.n_frame,
-                                           config.model.n_keypoint,
-                                           config.model.n_dim])
-    valid_set = (valid_set - config.data.mean) / config.data.std
+                                                [config.model.n_frame,
+                                                 config.model.n_keypoint,
+                                                 config.model.n_dim],
+                                                as_flow=config.data.as_flow)
+    # valid_set = (valid_set - config.data.mean) / config.data.std
     valid_mask = np.sum(valid_mask != -1, axis=-1)
 
     def training_data(package, max_step=None, max_epoch=None):
@@ -327,8 +343,9 @@ if __name__ == "__main__":
         for batch in random_batch_generator(package, config.train.batch_size,
                                             max_step=max_step,
                                             max_epoch=max_epoch):
-            batch[0], mask = load_batch_parallel(batch[0], shape)
-            batch[0] = (batch[0] - config.data.mean) / config.data.std
+            batch[0], mask = load_batch_parallel(batch[0], shape,
+                                                 as_flow=config.data.as_flow)
+            # batch[0] = (batch[0] - config.data.mean) / config.data.std
             yield batch[0], batch[1], np.sum(mask != -1, axis=-1)
 
     # Pretrain the temporal attention
@@ -349,8 +366,8 @@ if __name__ == "__main__":
                    valid_per=config.train.valid_per_step,
                    save_per=config.train.save_per_step,
                    freeze_vars=["temporal"],
-                   restore_vars=["temporal"],
-                   restore_ckpt="checkpoint/temporal-pretrain")
+                   restore_from={"checkpoint/temporal-pretrain":
+                                     ["temporal"]})
 
     # Finetune the temporal attention
     data = training_data([train_set, train_label],
@@ -358,8 +375,8 @@ if __name__ == "__main__":
     t1_model.train(data, valid_data=[valid_set, valid_label, valid_mask],
                    valid_per=config.train.valid_per_step,
                    save_per=config.train.save_per_step,
-                   restore_vars=["lstm", "global_step"],
-                   restore_ckpt="checkpoint/temporal-train")
+                   restore_from={"checkpoint/temporal-train":
+                                     ["lstm", "global_step", "batchnorm"]})
 
     # Pretrain the spatio attention
     t0_model = STModel(config.model, 1, use_temporal_attn=False,
@@ -379,8 +396,8 @@ if __name__ == "__main__":
                    valid_per=config.train.valid_per_step,
                    save_per=config.train.save_per_step,
                    freeze_vars=["spatio"],
-                   restore_vars=["spatio"],
-                   restore_ckpt="checkpoint/spatio-pretrain")
+                   restore_from={"checkpoint/spatio-pretrain":
+                                     ["spatio"]})
 
     # Finetune the spatio attention
     data = training_data([train_set, train_label],
@@ -388,6 +405,29 @@ if __name__ == "__main__":
     t1_model.train(data, valid_data=[valid_set, valid_label, valid_mask],
                    valid_per=config.train.valid_per_step,
                    save_per=config.train.save_per_step,
-                   restore_vars=["lstm", "global_step"],
-                   restore_ckpt="checkpoint/spatio-train")
+                   restore_from={"checkpoint/spatio-train":
+                                     ["lstm", "global_step", "batchnorm"]})
+
+    # Train the main network
+    st_model = STModel(config.model, 3, name="st-model")
+    data = training_data([train_set, train_label],
+                         max_epoch=config.train.n_pretrain_epoch)
+    st_model.train(data, valid_data=[valid_set, valid_label, valid_mask],
+                   valid_per=config.train.valid_per_step,
+                   save_per=config.train.save_per_step,
+                   freeze_vars=["spatio", "temporal"],
+                   restore_from={"checkpoint/spatio-train":
+                                     ["spatio"],
+                                 "checkpoint/temporal-train":
+                                     ["temproal"]})
+
+    # Finetune the main network
+    data = training_data([train_set, train_label],
+                         max_epoch=config.train.n_finetune_epoch)
+    st_model.train(data, valid_data=[valid_set, valid_label, valid_mask],
+                   valid_per=config.train.valid_per_step,
+                   save_per=config.train.save_per_step,
+                   restore_from={"checkpoint/st-model":
+                                     ["lstm", "global_step", "batchnorm"]})
+
 
