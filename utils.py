@@ -246,6 +246,9 @@ def get_config(filename):
     config.model.lambda1 = reader.getfloat("model", "lambda1")
     config.model.lambda2 = reader.getfloat("model", "lambda2")
     config.model.lambda3 = reader.getfloat("model", "lambda3")
+    config.model.use_bn = reader.getboolean("model", "use_bn")
+    config.model.use_res = reader.getboolean("model", "use_res")
+
 
     config.train = Config()
     config.train.batch_size = reader.getint("train", "batch_size")

@@ -29,6 +29,9 @@ class STModel(object):
         self.n_lstm = n_lstm
         self.use_temporal_attn = use_temporal_attn
         self.use_spatio_attn = use_spatio_attn
+        self._use_bn = config.use_bn
+        self._use_res = config.use_res
+
         # network pipeline
         self.graph = None
         self.x = None
@@ -78,9 +81,12 @@ class STModel(object):
                 self.training = tf.placeholder(tf.bool, [], name="training")
                 y_one_hot = tf.one_hot(self.y, self.n_class, name="one_hot")
 
-            with tf.variable_scope("batchnorm"):
-                feature = tf.layers.batch_normalization(self.x,
-                                                        training=self.training)
+            if self._use_bn:
+                with tf.variable_scope("batchnorm"):
+                    feature = tf.layers.batch_normalization(
+                        self.x, training=self.training)
+            else:
+                feature = self.x
 
             # regularizer
             with tf.variable_scope("regularizer"):
@@ -240,16 +246,16 @@ class STModel(object):
                 tf.logging.info(v)
 
     def train(self, train_data, valid_data=None, valid_per=100, save_per=1000,
-              restore_vars=None, freeze_vars=None, restore_from=None):
+              freeze_vars=None, restore_from=None, override=True):
         """Train the model
 
         :param train_data: data generator return x, y, mask for each call
         :param valid_data: data generatpr return x, y, mask for each call
         :param valid_per: a validation step after how many steps
         :param save_per: save the model after how many steps
-        :param restore_vars: a list of keywords to select viarables to restore
         :param freeze_vars: a list of keywords to freeze viarables
-        :param restore_ckpt: the directory to the saved pretrained model
+        :param restore_ckpt: the directory to the saved pretrained
+        :param override: whether to override the checkpoint file
         :return:
         """
         ckpt_dir = "./checkpoint/{}".format(self.name)
@@ -274,18 +280,16 @@ class STModel(object):
         tf.logging.info("Vars to be updated:")
         tf.logging.info([v.name for v in trainable_vars])
 
-        if tf.gfile.Exists(ckpt_dir):
-            tf.gfile.DeleteRecursively(ckpt_dir)
-
         gpu_opt = tf.GPUOptions(allow_growth=True,
                                 per_process_gpu_memory_fraction=0.7)
 
         with tf.Session(graph=self.graph,
                         config=tf.ConfigProto(gpu_options=gpu_opt)) as sess:
-
-            train_step = self.optimizer.minimize(self.loss,
-                                                 var_list=trainable_vars,
-                                                 global_step=self.global_step)
+            update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+            with tf.control_dependencies(update_ops):
+                op = self.optimizer.minimize(self.loss,
+                                             var_list=trainable_vars,
+                                             global_step=self.global_step)
 
             sess.run(tf.global_variables_initializer())
             if len(restore_from) > 0:
@@ -297,9 +301,14 @@ class STModel(object):
             saver = tf.train.Saver()
             tf.logging.info("Please monitor the training process with:\n"
                             "tensorboard --logdir=./summary")
+
+            if tf.gfile.Exists(ckpt_dir) and override:
+                tf.gfile.DeleteRecursively(ckpt_dir)
+
+            tf.logging.info("Start training {}".format(self.name))
             for x, y, m in train_data:
                 curr_step = sess.run(self.global_step)
-                summary, _ = sess.run([self.train_summary, train_step],
+                summary, _ = sess.run([self.train_summary, op],
                                       feed_dict={self.x: x,
                                                  self.y: y,
                                                  self.batch: x.shape[0],
@@ -316,7 +325,8 @@ class STModel(object):
                                                    self.training: False})
                     self.test_writter.add_summary(summary, curr_step)
                 if curr_step % save_per == 0:
-                    saver.save(sess, os.path.join(ckpt_dir, "model.ckpt"),
+                    saver.save(sess, os.path.join(ckpt_dir,
+                                                  "{}.ckpt".format(self.name)),
                                global_step=curr_step)
 
 
@@ -376,23 +386,24 @@ if __name__ == "__main__":
                    valid_per=config.train.valid_per_step,
                    save_per=config.train.save_per_step,
                    restore_from={"checkpoint/temporal-train":
-                                     ["lstm", "global_step", "batchnorm"]})
+                                     ["lstm", "global_step", "batchnorm"]},
+                   override=False)
 
     # Pretrain the spatio attention
-    t0_model = STModel(config.model, 1, use_temporal_attn=False,
+    s0_model = STModel(config.model, 1, use_temporal_attn=False,
                        name="spatio-pretrain")
     data = training_data([train_set, train_label],
                          max_epoch=config.train.n_pretrain_epoch)
-    t0_model.train(data, valid_data=[valid_set, valid_label, valid_mask],
+    s0_model.train(data, valid_data=[valid_set, valid_label, valid_mask],
                    valid_per=config.train.valid_per_step,
                    save_per=config.train.save_per_step)
 
     # Train the spatio attention
-    t1_model = STModel(config.model, 3, use_temporal_attn=False,
+    s1_model = STModel(config.model, 3, use_temporal_attn=False,
                        name="spatio-train")
     data = training_data([train_set, train_label],
                          max_epoch=config.train.n_pretrain_epoch)
-    t1_model.train(data, valid_data=[valid_set, valid_label, valid_mask],
+    s1_model.train(data, valid_data=[valid_set, valid_label, valid_mask],
                    valid_per=config.train.valid_per_step,
                    save_per=config.train.save_per_step,
                    freeze_vars=["spatio"],
@@ -402,11 +413,12 @@ if __name__ == "__main__":
     # Finetune the spatio attention
     data = training_data([train_set, train_label],
                          max_epoch=config.train.n_finetune_epoch)
-    t1_model.train(data, valid_data=[valid_set, valid_label, valid_mask],
+    s1_model.train(data, valid_data=[valid_set, valid_label, valid_mask],
                    valid_per=config.train.valid_per_step,
                    save_per=config.train.save_per_step,
                    restore_from={"checkpoint/spatio-train":
-                                     ["lstm", "global_step", "batchnorm"]})
+                                     ["lstm", "global_step", "batchnorm"]},
+                   override=False)
 
     # Train the main network
     st_model = STModel(config.model, 3, name="st-model")
